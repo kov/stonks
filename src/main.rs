@@ -133,18 +133,30 @@ impl App {
     }
 
     pub fn cmd_list(&self, filter: &Option<String>) {
-        let db = self.db_client.database("stonks");
-        match db.list_collection_names(doc! {
-            "name": { "$regex": filter.as_ref().unwrap_or(&String::from("")) }
-        }) {
-            Ok(names) => {
-                for name in names {
-                    let collection = db.collection(name.as_str());
-                    println!("{} ({} operations)",
-                        name, collection.estimated_document_count(None).unwrap());
-                }
-            },
-            Err(_) => (),
+        let collection = self.db_client.database("stonks").collection("stocks");
+
+        let mut pipeline = Vec::new();
+        if let Some(f) = filter {
+            pipeline.push(doc!{
+                "$match" : { "ticker": { "$regex": &f } }
+            });
+        }
+        pipeline.push(doc! {
+            "$group": {
+                "_id": "$ticker",
+                "count": { "$sum": 1 }
+            }
+        });
+
+        let cursor = match collection.aggregate(pipeline, None) {
+            Ok(cursor) => cursor,
+            Err(e) => { println!("{}", e); return }
+        };
+        for doc in cursor {
+            match doc {
+                Ok(doc) => println!("{} ({} operations)", doc.get_str("_id").unwrap(), doc.get_i32("count").unwrap()),
+                Err(_) => ()
+            }
         }
         println!("ls filter: {:?}", filter);
     }
@@ -157,8 +169,9 @@ impl App {
             Some(date) => date,
             None => now,
         };
-        let collection = self.db_client.database("stonks").collection(ticker);
+        let collection = self.db_client.database("stonks").collection("stocks");
         match collection.insert_one(doc! {
+            "ticker": ticker,
             "kind": kind.to_string(),
             "quantity": quantity,
             "price": price.to_f64().unwrap(),
