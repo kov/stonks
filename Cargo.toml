@@ -3,6 +3,7 @@ name = "stonks"
 version = "0.1.0"
 authors = ["Gustavo Noronha Silva <gustavo@noronha.eti.br>"]
 edition = "2018"
+default-run = "stonks"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
