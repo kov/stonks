@@ -135,6 +135,15 @@ impl App {
     }
 
     pub fn run(&mut self) {
+        // If arguments were given, execute the command and quit.
+        let args: Vec<String> = std::env::args().collect();
+        if args.len() > 1 {
+            match Statement::from_iter_safe(&args[1..]) {
+                Ok(statement) => { self.process_statement(statement); return },
+                Err(e) => { println!("{}", e); return }
+            }
+        }
+
         loop {
             let readline = self.editor.readline(">> ");
             match readline {
