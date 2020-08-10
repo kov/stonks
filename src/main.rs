@@ -1,6 +1,6 @@
 use std::fmt::{self, Debug, Display};
 use chrono::{Utc,Local,DateTime};
-use mongodb::bson;
+use mongodb::bson::{Bson, doc};
 use rust_decimal::prelude::*;
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
@@ -35,6 +35,11 @@ enum Command {
         price: Decimal,
         date: Option<DateTime<Local>>,
     },
+
+    AvgPrice {
+        filter: Option<String>,
+        until: Option<DateTime<Local>>,
+    }
 }
 
 #[derive(Debug)]
@@ -47,6 +52,25 @@ impl Display for OperationKind {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         Debug::fmt(self, f)
     }
+}
+
+impl FromStr for OperationKind {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let lower = s.to_lowercase();
+        match lower.as_str() {
+            "buy" => Ok(OperationKind::Buy),
+            "sell" => Ok(OperationKind::Sell),
+            _ => Err(String::from("Unknown operation kind"))
+        }
+    }
+}
+
+struct Position {
+    ticker: String,
+    value: f64,
+    quantity: i64,
+    average_price: f64,
 }
 
 struct App {
@@ -110,7 +134,7 @@ impl App {
 
     pub fn cmd_list(&self, filter: &Option<String>) {
         let db = self.db_client.database("stonks");
-        match db.list_collection_names(bson::doc! {
+        match db.list_collection_names(doc! {
             "name": { "$regex": filter.as_ref().unwrap_or(&String::from("")) }
         }) {
             Ok(names) => {
@@ -134,11 +158,11 @@ impl App {
             None => now,
         };
         let collection = self.db_client.database("stonks").collection(ticker);
-        match collection.insert_one(bson::doc! {
+        match collection.insert_one(doc! {
             "kind": kind.to_string(),
             "quantity": quantity,
             "price": price.to_f64().unwrap(),
-            "date": bson::Bson::DateTime(actual_date.with_timezone(&Utc)),
+            "date": Bson::DateTime(actual_date.with_timezone(&Utc)),
         }, None) {
             Ok(_) => (),
             Err(e) => println!("Error inserting operation {}", e)
@@ -154,6 +178,117 @@ impl App {
         self.add_operation(OperationKind::Sell, ticker, quantity, price, date);
     }
 
+    pub fn cmd_avgprice(&self, filter: &Option<String>, until: &Option<DateTime<Local>>) {
+        let collection = self.db_client.database("stonks").collection("stocks");
+
+        let mut pipeline = Vec::new();
+        if let Some(f) = filter {
+            pipeline.push(doc!{
+                "$match" : { "ticker": { "$regex": &f } }
+            });
+        }
+        pipeline.push(doc! {
+                "$group" : { "_id": "$ticker" }
+            }
+        );
+        let cursor = match collection.aggregate(pipeline, None) {
+            Ok(cursor) => cursor,
+            Err(e) => { println!("{}", e); return }
+        };
+
+        let mut tickers = Vec::new();
+        for doc in cursor {
+            match doc {
+                Ok(doc) => {
+                    tickers.push(doc.get_str("_id").unwrap().to_string());
+                },
+                Err(_) => ()
+            }
+        }
+        for ticker in tickers {
+            let average = self.average_price(&ticker, until);
+            println!("{}\t{:>9.2}", &ticker, average)
+        }
+    }
+
+    pub fn calculate_position(&self, ticker: &str, until: &Option<DateTime<Local>>) -> Position {
+        let now = &chrono::Local::now();
+        let date = match until {
+            Some(date) => date,
+            None => now,
+        };
+
+        let collection = self.db_client.database("stonks").collection("stocks");
+        let filter = doc!{
+            "$and": [
+                { "ticker": &ticker },
+                {
+                    "date": {
+                        "$lte": Bson::DateTime(date.with_timezone(&Utc))
+                    }
+                }
+            ]
+        };
+        let cursor = match collection.find(filter, None) {
+            Ok(cursor) => cursor,
+            Err(e) => {
+                println!("{}", e);
+                return Position {
+                    ticker: ticker.to_string(),
+                    value: 0.0,
+                    quantity: 0,
+                    average_price: 0.0
+                }
+            }
+        };
+
+        let mut total_amount = 0f64;
+        let mut total_quantity = 0i64;
+
+        for document in cursor {
+            if let Ok(document) = document {
+                let quantity = document.get_i64("quantity").unwrap();
+                let kind = OperationKind::from_str(document.get_str("kind").unwrap()).unwrap();
+                match kind {
+                    OperationKind::Buy => {
+                        let price = document.get_f64("price").unwrap();
+                        total_amount += price * quantity as f64;
+                        total_quantity += quantity;
+                    },
+                    OperationKind::Sell => {
+                        /* When selling, we need to use the average price of the buys
+                         * at the moment for the average calculation to work. We may
+                         * take out too little if the current price is lower or too
+                         * much otherwise.
+                         */
+                        let price = total_amount / total_quantity as f64;
+                        total_amount -= price * quantity as f64;
+                        total_quantity -= quantity;
+                    }
+                }
+            }
+        }
+
+        let average;
+        if total_quantity == 0 || total_amount == 0.0 {
+            average = 0.0;
+        } else {
+            average = total_amount / total_quantity as f64;
+        }
+
+        Position {
+            ticker: ticker.to_string(),
+            value: total_amount,
+            quantity: total_quantity,
+            average_price: average,
+        }
+    }
+
+    pub fn average_price(&self, ticker: &str, until: &Option<DateTime<Local>>) -> f64 {
+        let position = self.calculate_position(ticker, until);
+        return position.average_price;
+    }
+
     pub fn process_statement(&self, statement: Statement) {
         let command = statement.command.unwrap();
         match &command {
@@ -164,6 +299,9 @@ impl App {
             Command::Sell { ticker, quantity, price, date } => {
                 self.cmd_sell(ticker, quantity, price, date);
             },
+            Command::AvgPrice { filter, until } => {
+                self.cmd_avgprice(filter, until);
+            }
         }
     }
 
