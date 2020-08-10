@@ -64,8 +64,41 @@ impl App {
         }
     }
 
+    pub fn tokenize_line(&self, line: &str) -> Vec<String> {
+        let mut parts = Vec::<String>::new();
+        let mut current = String::new();
+        let mut in_quotes = false;
+        for c in line.chars() {
+            match c {
+                ' ' => {
+                    if in_quotes {
+                        current.push(c);
+                        continue;
+                    }
+                    parts.push(current.to_string());
+                    current.clear();
+                },
+                '"' => {
+                    in_quotes = !in_quotes;
+                },
+                _ => {
+                    current.push(c);
+                }
+            }
+        }
+        if in_quotes {
+            println!("Unmatched quote");
+        }
+        if !current.is_empty() {
+            parts.push(current.to_string());
+        }
+        println!("{:?}", parts);
+        return parts;
+    }
+
     pub fn parse_line(&self, line: &str) -> Option<Statement> {
-        let statement = match Statement::from_iter_safe(line.split(' ')) {
+        let tokens = self.tokenize_line(line);
+        let statement = match Statement::from_iter_safe(tokens) {
             Ok(statement) => statement,
             Err(e) => { println!("{}", e); return None }
         };
